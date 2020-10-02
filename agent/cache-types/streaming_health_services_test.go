@@ -28,10 +28,9 @@ func TestStreamingHealthServices_EmptySnapshot(t *testing.T) {
 	// EndOfSnapshot message immediately with index of 1.
 	client.QueueEvents(newEndOfSnapshotEvent(pbsubscribe.Topic_ServiceHealth, 1))
 
-	// This contains the view state so important we share it between calls.
 	opts := cache.FetchOptions{
 		MinIndex: 0,
-		Timeout:  1 * time.Second,
+		Timeout:  time.Second,
 	}
 	req := &structs.ServiceSpecificRequest{
 		Datacenter:  "dc1",

@@ -66,7 +66,6 @@ type Deps struct {
 	Waiter  *retry.Waiter
 	Request func(index uint64) pbsubscribe.SubscribeRequest
 	Stop    func()
-	Done    <-chan struct{}
 }
 
 // StreamClient provides a subscription to state change events.
@@ -83,15 +82,6 @@ func NewMaterializer(deps Deps) *Materializer {
 	}
 	v.reset()
 	return v
-}
-
-// Close implements io.Close and discards view state and stops background view
-// maintenance.
-func (m *Materializer) Close() error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	m.deps.Stop()
-	return nil
 }
 
 // Run receives events from the StreamClient and sends them to the View. It runs
@@ -225,7 +215,7 @@ func (m *Materializer) notifyUpdateLocked(err error) {
 // Fetch implements the logic a StreamingCacheType will need during it's Fetch
 // call. Cache types that use streaming should just be able to proxy to this
 // once they have a subscription object and return it's results directly.
-func (m *Materializer) Fetch(opts cache.FetchOptions) (cache.FetchResult, error) {
+func (m *Materializer) Fetch(done <-chan struct{}, opts cache.FetchOptions) (cache.FetchResult, error) {
 	var result cache.FetchResult
 
 	// Get current view Result and index
@@ -241,8 +231,6 @@ func (m *Materializer) Fetch(opts cache.FetchOptions) (cache.FetchResult, error)
 
 	result.Index = index
 	result.Value = val
-	// TODO: wrap in a closer instead of passing in a cancel() function
-	result.State = m
 
 	// If our index is > req.Index return right away. If index is zero then we
 	// haven't loaded a snapshot at all yet which means we should wait for one on
@@ -297,7 +285,7 @@ func (m *Materializer) Fetch(opts cache.FetchOptions) (cache.FetchResult, error)
 			// Just return whatever we got originally, might still be empty
 			return result, nil
 
-		case <-m.deps.Done:
+		case <-done:
 			return result, context.Canceled
 		}
 	}

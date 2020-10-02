@@ -44,7 +44,8 @@ type MaterializerDeps struct {
 // Fetch implements cache.Type
 func (c *StreamingHealthServices) Fetch(opts cache.FetchOptions, req cache.Request) (cache.FetchResult, error) {
 	if opts.LastResult != nil && opts.LastResult.State != nil {
-		return opts.LastResult.State.(*submatview.Materializer).Fetch(opts)
+		state := opts.LastResult.State.(*streamingHealthState)
+		return state.materializer.Fetch(state.done, opts)
 	}
 
 	srvReq := req.(*structs.ServiceSpecificRequest)
@@ -66,7 +67,16 @@ func (c *StreamingHealthServices) Fetch(opts cache.FetchOptions, req cache.Reque
 	if err != nil {
 		return cache.FetchResult{}, err
 	}
-	return m.Fetch(opts)
+	ctx, cancel := context.WithCancel(context.TODO())
+	go m.Run(ctx)
+
+	result, err := m.Fetch(ctx.Done(), opts)
+	result.State = &streamingHealthState{
+		materializer: m,
+		done:         ctx.Done(),
+		cancel:       cancel,
+	}
+	return result, err
 }
 
 func newMaterializer(
@@ -78,8 +88,7 @@ func newMaterializer(
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(context.TODO())
-	materializer := submatview.NewMaterializer(submatview.Deps{
+	return submatview.NewMaterializer(submatview.Deps{
 		View:   view,
 		Client: d.Client,
 		Logger: d.Logger,
@@ -90,11 +99,18 @@ func newMaterializer(
 			Jitter:      retry.NewJitter(100),
 		},
 		Request: r,
-		Stop:    cancel,
-		Done:    ctx.Done(),
-	})
-	go materializer.Run(ctx)
-	return materializer, nil
+	}), nil
+}
+
+type streamingHealthState struct {
+	materializer *submatview.Materializer
+	done         <-chan struct{}
+	cancel       func()
+}
+
+func (c *streamingHealthState) Close() error {
+	c.cancel()
+	return nil
 }
 
 func newHealthViewState(filterExpr string) (submatview.View, error) {
