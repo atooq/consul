@@ -241,6 +241,7 @@ func (m *Materializer) Fetch(opts cache.FetchOptions) (cache.FetchResult, error)
 
 	result.Index = index
 	result.Value = val
+	// TODO: wrap in a closer instead of passing in a cancel() function
 	result.State = m
 
 	// If our index is > req.Index return right away. If index is zero then we

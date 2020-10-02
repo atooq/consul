@@ -62,11 +62,11 @@ func (c *StreamingHealthServices) Fetch(opts cache.FetchOptions, req cache.Reque
 		return req
 	}
 
-	view, err := newMaterializer(c.deps, newReqFn, srvReq.Filter)
+	m, err := newMaterializer(c.deps, newReqFn, srvReq.Filter)
 	if err != nil {
 		return cache.FetchResult{}, err
 	}
-	return view.Fetch(opts)
+	return m.Fetch(opts)
 }
 
 func newMaterializer(
@@ -74,13 +74,13 @@ func newMaterializer(
 	r func(uint64) pbsubscribe.SubscribeRequest,
 	filter string,
 ) (*submatview.Materializer, error) {
-	state, err := newHealthViewState(filter)
+	view, err := newHealthViewState(filter)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.TODO())
-	view := submatview.NewMaterializer(submatview.Deps{
-		View:   state,
+	materializer := submatview.NewMaterializer(submatview.Deps{
+		View:   view,
 		Client: d.Client,
 		Logger: d.Logger,
 		Waiter: &retry.Waiter{
@@ -93,8 +93,8 @@ func newMaterializer(
 		Stop:    cancel,
 		Done:    ctx.Done(),
 	})
-	go view.Run(ctx)
-	return view, nil
+	go materializer.Run(ctx)
+	return materializer, nil
 }
 
 func newHealthViewState(filterExpr string) (submatview.View, error) {
