@@ -15,8 +15,9 @@ import (
 	"github.com/hashicorp/consul/proto/pbsubscribe"
 )
 
-// View is the interface used to manage they type-specific
-// materialized view logic.
+// View receives events from, and return results to, Materializer. A view is
+// responsible for converting the pbsubscribe.Event.Payload into the local
+// type, and storing it so that it can be returned by Result().
 type View interface {
 	// Update is called when one or more events are received. The first call will
 	// include _all_ events in the initial snapshot which may be an empty set.
@@ -38,35 +39,14 @@ type View interface {
 	Reset()
 }
 
-// resetErr represents a server request to reset the subscription, it's typed so
-// we can mark it as temporary and so attempt to retry first time without
-// notifying clients.
-type resetErr string
-
-// Temporary Implements the internal Temporary interface
-func (e resetErr) Temporary() bool {
-	return true
-}
-
-// Error implements error
-func (e resetErr) Error() string {
-	return string(e)
-}
-
-// TODO: update godoc
-// Materializer is a partial view of the state on servers, maintained via
-// streaming subscriptions. It is specialized for different cache types by
-// providing a View that encapsulates the logic to update the
-// state and format it as the correct result type.
+// Materializer consumes the event stream, handling any framing events, and
+// sends the events to View as they are received.
 //
-// The Materializer object becomes the cache.Result.State for a streaming
+// Materializer is used as the cache.Result.State for a streaming
 // cache type and manages the actual streaming RPC call to the servers behind
 // the scenes until the cache result is discarded when TTL expires.
 type Materializer struct {
-	// Properties above the lock are immutable after the view is constructed in
-	// NewMaterializer and must not be modified.
-	deps MaterializerDeps
-
+	deps        Deps
 	retryWaiter *retry.Waiter
 	handler     eventHandler
 
@@ -79,10 +59,9 @@ type Materializer struct {
 	err      error
 }
 
-// TODO: rename
-type MaterializerDeps struct {
+type Deps struct {
 	View    View
-	Client  StreamingClient
+	Client  StreamClient
 	Logger  hclog.Logger
 	Waiter  *retry.Waiter
 	Request func(index uint64) pbsubscribe.SubscribeRequest
@@ -90,20 +69,13 @@ type MaterializerDeps struct {
 	Done    <-chan struct{}
 }
 
-// StreamingClient is the interface we need from the gRPC client stub. Separate
-// interface simplifies testing.
-type StreamingClient interface {
+// StreamClient provides a subscription to state change events.
+type StreamClient interface {
 	Subscribe(ctx context.Context, in *pbsubscribe.SubscribeRequest, opts ...grpc.CallOption) (pbsubscribe.StateChangeSubscription_SubscribeClient, error)
 }
 
-// NewMaterializer retrieves an existing view from the cache result
-// state if one exists, otherwise creates a new one. Note that the returned view
-// MUST have Close called eventually to avoid leaking resources. Typically this
-// is done automatically if the view is returned in a cache.Result.State when
-// the cache evicts the result. If the view is not returned in a result state
-// though Close must be called some other way to avoid leaking the goroutine and
-// memory.
-func NewMaterializer(deps MaterializerDeps) *Materializer {
+// NewMaterializer returns a new Materializer. Run must be called to start it.
+func NewMaterializer(deps Deps) *Materializer {
 	v := &Materializer{
 		deps:        deps,
 		view:        deps.View,
@@ -122,12 +94,10 @@ func (m *Materializer) Close() error {
 	return nil
 }
 
+// Run receives events from the StreamClient and sends them to the View. It runs
+// until ctx is cancelled, so it is expected to be run in a goroutine.
 func (m *Materializer) Run(ctx context.Context) {
 	for {
-		if ctx.Err() != nil {
-			return
-		}
-
 		req := m.deps.Request(m.index)
 		err := m.runSubscription(ctx, req)
 		if ctx.Err() != nil {
@@ -141,9 +111,7 @@ func (m *Materializer) Run(ctx context.Context) {
 		// If it's non-temporary or a repeated failure return to clients while we
 		// retry to get back in a good state.
 		if _, ok := err.(temporary); !ok || m.retryWaiter.Failures() > 0 {
-			// Report error to blocked fetchers
-			m.err = err
-			m.notifyUpdateLocked()
+			m.notifyUpdateLocked(err)
 		}
 		waitCh := m.retryWaiter.Failed()
 		failures := m.retryWaiter.Failures()
@@ -205,6 +173,21 @@ func isGrpcStatus(err error, code codes.Code) bool {
 	return ok && s.Code() == code
 }
 
+// resetErr represents a server request to reset the subscription, it's typed so
+// we can mark it as temporary and so attempt to retry first time without
+// notifying clients.
+type resetErr string
+
+// Temporary Implements the internal Temporary interface
+func (e resetErr) Temporary() bool {
+	return true
+}
+
+// Error implements error
+func (e resetErr) Error() string {
+	return string(e)
+}
+
 // reset clears the state ready to start a new stream from scratch.
 func (m *Materializer) reset() {
 	m.lock.Lock()
@@ -212,28 +195,27 @@ func (m *Materializer) reset() {
 
 	m.view.Reset()
 	m.index = 0
-	m.err = nil
-	m.notifyUpdateLocked()
+	m.notifyUpdateLocked(nil)
 	m.retryWaiter.Success()
 }
 
 func (m *Materializer) updateView(events []*pbsubscribe.Event, index uint64) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
+
 	if err := m.view.Update(events); err != nil {
 		return err
 	}
-
 	m.index = index
-	m.err = nil
-	m.notifyUpdateLocked()
+	m.notifyUpdateLocked(nil)
 	m.retryWaiter.Success()
 	return nil
 }
 
 // notifyUpdateLocked closes the current update channel and recreates a new
 // one. It must be called while holding the s.lock lock.
-func (m *Materializer) notifyUpdateLocked() {
+func (m *Materializer) notifyUpdateLocked(err error) {
+	m.err = err
 	if m.updateCh != nil {
 		close(m.updateCh)
 	}

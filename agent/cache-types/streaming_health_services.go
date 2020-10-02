@@ -37,7 +37,7 @@ func NewStreamingHealthServices(deps MaterializerDeps) *StreamingHealthServices 
 }
 
 type MaterializerDeps struct {
-	Client submatview.StreamingClient
+	Client submatview.StreamClient
 	Logger hclog.Logger
 }
 
@@ -79,7 +79,7 @@ func newMaterializer(
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.TODO())
-	view := submatview.NewMaterializer(submatview.MaterializerDeps{
+	view := submatview.NewMaterializer(submatview.Deps{
 		View:   state,
 		Client: d.Client,
 		Logger: d.Logger,
