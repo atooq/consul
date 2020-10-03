@@ -44,8 +44,7 @@ type MaterializerDeps struct {
 // Fetch implements cache.Type
 func (c *StreamingHealthServices) Fetch(opts cache.FetchOptions, req cache.Request) (cache.FetchResult, error) {
 	if opts.LastResult != nil && opts.LastResult.State != nil {
-		state := opts.LastResult.State.(*streamingHealthState)
-		return state.materializer.Fetch(state.done, opts)
+		return opts.LastResult.State.(*streamingHealthState).Fetch(opts)
 	}
 
 	srvReq := req.(*structs.ServiceSpecificRequest)
@@ -70,13 +69,12 @@ func (c *StreamingHealthServices) Fetch(opts cache.FetchOptions, req cache.Reque
 	ctx, cancel := context.WithCancel(context.TODO())
 	go m.Run(ctx)
 
-	result, err := m.Fetch(ctx.Done(), opts)
-	result.State = &streamingHealthState{
+	state := &streamingHealthState{
 		materializer: m,
 		done:         ctx.Done(),
 		cancel:       cancel,
 	}
-	return result, err
+	return state.Fetch(opts)
 }
 
 func newMaterializer(
@@ -102,15 +100,23 @@ func newMaterializer(
 	}), nil
 }
 
+// streamingHealthState wraps a Materializer to manage its lifecycle, and to
+// add itself to the FetchResult.State.
 type streamingHealthState struct {
 	materializer *submatview.Materializer
 	done         <-chan struct{}
 	cancel       func()
 }
 
-func (c *streamingHealthState) Close() error {
-	c.cancel()
+func (s *streamingHealthState) Close() error {
+	s.cancel()
 	return nil
+}
+
+func (s *streamingHealthState) Fetch(opts cache.FetchOptions) (cache.FetchResult, error) {
+	result, err := s.materializer.Fetch(s.done, opts)
+	result.State = s
+	return result, err
 }
 
 func newHealthViewState(filterExpr string) (submatview.View, error) {
@@ -166,7 +172,7 @@ func (s *healthView) Update(events []*pbsubscribe.Event) error {
 	return nil
 }
 
-// Result implements View
+// Result returns the structs.IndexedCheckServiceNodes stored by this view.
 func (s *healthView) Result(index uint64) (interface{}, error) {
 	var result structs.IndexedCheckServiceNodes
 	// Avoid a nil slice if there are no results in the view
