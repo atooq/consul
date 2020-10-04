@@ -1,6 +1,7 @@
 package retry
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ func TestJitter(t *testing.T) {
 			require.True(t, newTime <= maxTime)
 		}
 	})
+
+	// TODO: test overflows
 }
 
 func repeat(t *testing.T, name string, fn func(t *testing.T)) {
@@ -47,99 +50,109 @@ func repeat(t *testing.T, name string, fn func(t *testing.T)) {
 	})
 }
 
-func TestRetryWaiter_calculateWait(t *testing.T) {
-	t.Run("Defaults", func(t *testing.T) {
-		rw := NewWaiter(0, 0, 0, nil)
-
-		require.Equal(t, 0*time.Nanosecond, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 1*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 2*time.Second, rw.calculateWait())
-		rw.failures = 31
-		require.Equal(t, defaultMaxWait, rw.calculateWait())
+func TestWaiter_Delay(t *testing.T) {
+	t.Run("zero value", func(t *testing.T) {
+		w := &Waiter{}
+		for i, expected := range []time.Duration{0, 1, 2, 4, 8, 16, 32, 64, 128} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Second, w.delay(), "failure count: %d", i)
+		}
 	})
 
-	t.Run("Minimum Wait", func(t *testing.T) {
-		rw := NewWaiter(0, 5*time.Second, 0, nil)
-
-		require.Equal(t, 5*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 5*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 5*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 5*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 8*time.Second, rw.calculateWait())
+	t.Run("with minimum wait", func(t *testing.T) {
+		w := &Waiter{MinWait: 5 * time.Second}
+		for i, expected := range []time.Duration{5, 5, 5, 5, 8, 16, 32, 64, 128} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Second, w.delay(), "failure count: %d", i)
+		}
 	})
 
-	t.Run("Minimum Failures", func(t *testing.T) {
-		rw := NewWaiter(5, 0, 0, nil)
-		require.Equal(t, 0*time.Nanosecond, rw.calculateWait())
-		rw.failures += 5
-		require.Equal(t, 0*time.Nanosecond, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 1*time.Second, rw.calculateWait())
+	t.Run("with maximum wait", func(t *testing.T) {
+		w := &Waiter{MaxWait: 20 * time.Second}
+		for i, expected := range []time.Duration{0, 1, 2, 4, 8, 16, 20, 20, 20} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Second, w.delay(), "failure count: %d", i)
+		}
 	})
 
-	t.Run("Maximum Wait", func(t *testing.T) {
-		rw := NewWaiter(0, 0, 5*time.Second, nil)
-		require.Equal(t, 0*time.Nanosecond, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 1*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 2*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 4*time.Second, rw.calculateWait())
-		rw.failures += 1
-		require.Equal(t, 5*time.Second, rw.calculateWait())
-		rw.failures = 31
-		require.Equal(t, 5*time.Second, rw.calculateWait())
+	t.Run("with minimum failures", func(t *testing.T) {
+		w := &Waiter{MinFailures: 4}
+		for i, expected := range []time.Duration{0, 0, 0, 0, 0, 1, 2, 4, 8, 16} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Second, w.delay(), "failure count: %d", i)
+		}
+	})
+
+	t.Run("with factor", func(t *testing.T) {
+		w := &Waiter{Factor: time.Millisecond}
+		for i, expected := range []time.Duration{0, 1, 2, 4, 8, 16, 32, 64, 128} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Millisecond, w.delay(), "failure count: %d", i)
+		}
+	})
+
+	t.Run("with all settings", func(t *testing.T) {
+		w := &Waiter{
+			MinFailures: 2,
+			MinWait:     4 * time.Millisecond,
+			MaxWait:     20 * time.Millisecond,
+			Factor:      time.Millisecond,
+		}
+		for i, expected := range []time.Duration{4, 4, 4, 4, 4, 4, 8, 16, 20, 20, 20} {
+			w.failures = uint(i)
+			require.Equal(t, expected*time.Millisecond, w.delay(), "failure count: %d", i)
+		}
 	})
 }
 
-func TestWaiter_WaitChannels(t *testing.T) {
-	w := &Waiter{
-		MinFailures: 0,
-		MinWait:     10 * time.Millisecond,
-		MaxWait:     50 * time.Millisecond,
+func TestWaiter_Wait(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("first failure", func(t *testing.T) {
+		w := &Waiter{MinWait: time.Millisecond, Factor: 1}
+		elapsed, err := runWait(ctx, w)
+		require.NoError(t, err)
+		assertApproximateDuration(t, elapsed, time.Millisecond)
+		require.Equal(t, w.failures, uint(1))
+	})
+
+	t.Run("max failures", func(t *testing.T) {
+		w := &Waiter{
+			MaxWait:  100 * time.Millisecond,
+			failures: 200,
+		}
+		elapsed, err := runWait(ctx, w)
+		require.NoError(t, err)
+		assertApproximateDuration(t, elapsed, 100*time.Millisecond)
+		require.Equal(t, w.failures, uint(201))
+	})
+
+	t.Run("context deadline", func(t *testing.T) {
+		w := &Waiter{failures: 200, MinWait: time.Second}
+		ctx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+		t.Cleanup(cancel)
+
+		elapsed, err := runWait(ctx, w)
+		require.Equal(t, err, context.DeadlineExceeded)
+		assertApproximateDuration(t, elapsed, 5*time.Millisecond)
+		require.Equal(t, w.failures, uint(201))
+	})
+}
+
+func runWait(ctx context.Context, w *Waiter) (time.Duration, error) {
+	before := time.Now()
+	err := w.Wait(ctx)
+	return time.Since(before), err
+}
+
+func assertApproximateDuration(t *testing.T, actual time.Duration, expected time.Duration) {
+	t.Helper()
+	delta := 20 * time.Millisecond
+	min, max := expected-delta, expected+delta
+	if min < 0 {
+		min = 0
 	}
-
-	t.Run("Minimum Wait - Success", func(t *testing.T) {
-		select {
-		case <-time.After(2 * time.Millisecond):
-			require.Fail(t, "Success should not wait")
-		case <-w.Success():
-		}
-	})
-
-	t.Run("Minimum Wait - WaitIf", func(t *testing.T) {
-		defer w.Success()
-		select {
-		case <-time.After(2 * time.Millisecond):
-		case <-w.WaitIf(false):
-			require.Fail(t, "WaitIf did not wait long enough")
-		}
-	})
-
-	w.MinWait = 0
-	w.MaxWait = 50 * time.Millisecond
-	t.Run("Maximum Wait - Failed", func(t *testing.T) {
-		defer w.Success()
-		select {
-		case <-time.After(200 * time.Millisecond):
-			require.Fail(t, "Failed waited too long")
-		case <-w.Failed():
-		}
-	})
-
-	t.Run("Maximum Wait - WaitIf", func(t *testing.T) {
-		defer w.Success()
-		select {
-		case <-time.After(200 * time.Millisecond):
-			require.Fail(t, "maximum WaitIf waited too long")
-		case <-w.WaitIf(true):
-		}
-	})
+	if actual < min || actual > max {
+		t.Fatalf("expected %v to be between %v and %v", actual, min, max)
+	}
 }

@@ -183,7 +183,7 @@ func (m *Materializer) reset() {
 	m.view.Reset()
 	m.index = 0
 	m.notifyUpdateLocked(nil)
-	m.retryWaiter.Success()
+	m.retryWaiter.Reset()
 }
 
 func (m *Materializer) updateView(events []*pbsubscribe.Event, index uint64) error {
@@ -195,7 +195,7 @@ func (m *Materializer) updateView(events []*pbsubscribe.Event, index uint64) err
 	}
 	m.index = index
 	m.notifyUpdateLocked(nil)
-	m.retryWaiter.Success()
+	m.retryWaiter.Reset()
 	return nil
 }
 

@@ -18,8 +18,6 @@ const (
 	// replicationMaxRetryWait is the maximum number of seconds to wait between
 	// failed blocking queries when backing off.
 	replicationDefaultMaxRetryWait = 120 * time.Second
-
-	replicationDefaultRate = 1
 )
 
 type ReplicatorDelegate interface {
@@ -73,10 +71,7 @@ func NewReplicator(config *ReplicatorConfig) (*Replicator, error) {
 	}
 
 	minFailures := config.MinFailures
-	if minFailures < 0 {
-		minFailures = 0
-	}
-	waiter := retry.NewWaiter(minFailures, 0*time.Second, maxWait, retry.NewJitter(10))
+	waiter := retry.NewWaiter(minFailures, 0, maxWait, retry.NewJitter(10))
 	return &Replicator{
 		limiter:          limiter,
 		waiter:           waiter,
@@ -100,10 +95,8 @@ func (r *Replicator) Run(ctx context.Context) error {
 		// Perform a single round of replication
 		index, exit, err := r.delegate.Replicate(ctx, atomic.LoadUint64(&r.lastRemoteIndex), r.logger)
 		if exit {
-			// the replication function told us to exit
 			return nil
 		}
-
 		if err != nil {
 			// reset the lastRemoteIndex when there is an RPC failure. This should cause a full sync to be done during
 			// the next round of replication
@@ -112,18 +105,16 @@ func (r *Replicator) Run(ctx context.Context) error {
 			if r.suppressErrorLog != nil && !r.suppressErrorLog(err) {
 				r.logger.Warn("replication error (will retry if still leader)", "error", err)
 			}
-		} else {
-			atomic.StoreUint64(&r.lastRemoteIndex, index)
-			r.logger.Debug("replication completed through remote index", "index", index)
+
+			if err := r.waiter.Wait(ctx); err != nil {
+				return err
+			}
+			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil
-		// wait some amount of time to prevent churning through many replication rounds while replication is failing
-		case <-r.waiter.WaitIf(err != nil):
-			// do nothing
-		}
+		atomic.StoreUint64(&r.lastRemoteIndex, index)
+		r.logger.Debug("replication completed through remote index", "index", index)
+		r.waiter.Reset()
 	}
 }
 
