@@ -27,8 +27,10 @@ func NewJitter(percent int64) Jitter {
 			return baseTime
 		}
 
-		// TODO: test with math.MaxInt64
 		max := int64(baseTime) * percent / 100
+		if max < 0 { // overflow
+			return baseTime
+		}
 		return baseTime + time.Duration(rand.Int63n(max))
 	}
 }

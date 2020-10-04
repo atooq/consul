@@ -2,6 +2,7 @@ package retry
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -19,27 +20,28 @@ func TestJitter(t *testing.T) {
 
 	repeat(t, "10 percent", func(t *testing.T) {
 		jitter := NewJitter(10)
-		for i := 0; i < 10; i++ {
-			baseTime := 5000 * time.Millisecond
-			maxTime := 5500 * time.Millisecond
-			newTime := jitter(baseTime)
-			require.True(t, newTime > baseTime)
-			require.True(t, newTime <= maxTime)
-		}
+		baseTime := 5000 * time.Millisecond
+		maxTime := 5500 * time.Millisecond
+		newTime := jitter(baseTime)
+		require.True(t, newTime > baseTime)
+		require.True(t, newTime <= maxTime)
 	})
 
 	repeat(t, "100 percent", func(t *testing.T) {
 		jitter := NewJitter(100)
-		for i := 0; i < 10; i++ {
-			baseTime := 1234 * time.Millisecond
-			maxTime := 2468 * time.Millisecond
-			newTime := jitter(baseTime)
-			require.True(t, newTime > baseTime)
-			require.True(t, newTime <= maxTime)
-		}
+		baseTime := 1234 * time.Millisecond
+		maxTime := 2468 * time.Millisecond
+		newTime := jitter(baseTime)
+		require.True(t, newTime > baseTime)
+		require.True(t, newTime <= maxTime)
 	})
 
-	// TODO: test overflows
+	repeat(t, "overflow", func(t *testing.T) {
+		jitter := NewJitter(100)
+		baseTime := time.Duration(math.MaxInt64) - 2*time.Hour
+		newTime := jitter(baseTime)
+		require.Equal(t, baseTime, newTime)
+	})
 }
 
 func repeat(t *testing.T, name string, fn func(t *testing.T)) {
