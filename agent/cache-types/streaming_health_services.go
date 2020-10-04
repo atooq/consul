@@ -174,14 +174,15 @@ func (s *healthView) Update(events []*pbsubscribe.Event) error {
 
 // Result returns the structs.IndexedCheckServiceNodes stored by this view.
 func (s *healthView) Result(index uint64) (interface{}, error) {
-	var result structs.IndexedCheckServiceNodes
-	// Avoid a nil slice if there are no results in the view
-	// TODO: why this ^
-	result.Nodes = structs.CheckServiceNodes{}
+	result := structs.IndexedCheckServiceNodes{
+		Nodes: make(structs.CheckServiceNodes, 0, len(s.state)),
+		QueryMeta: structs.QueryMeta{
+			Index: index,
+		},
+	}
 	for _, node := range s.state {
 		result.Nodes = append(result.Nodes, node)
 	}
-	result.Index = index
 	return &result, nil
 }
 
